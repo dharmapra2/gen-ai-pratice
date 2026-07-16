@@ -1,0 +1,82 @@
+# Python bytecode / caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+venv/
+.venv/
+venv*/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# Env & secrets
+.env
+.env.test
+!.env.example
+!.env.test.example
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# Test/coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Mypy/Ruff/etc.
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Flask / logs
+*.log
+celerybeat-schedule
+
+# Databases (if local dev)
+*.sqlite
+*.db
+
+# Vector DB / model caches (adjust to your actual paths)
+chroma_db/*
+chroma_db*/*
+!chroma_db/.gitkeep
+.models/
+.cache/
+*.json
+
+# Node (if any)
+node_modules/
+
+
+# Ignore raw docs (transcripts, emails, etc.)
+documents/*
+docs/*
+Documents/*
+!documents/.gitkeep
+
+# Ignore logs
+logs/
+diff_log/
+*.code-workspace
+
+# Markdown and shell scripts
+*.sh
+
+
+credentials/
+
+
+
