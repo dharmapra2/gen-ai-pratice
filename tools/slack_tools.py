@@ -1,12 +1,36 @@
 import os
+import re
 
 from slack_sdk import WebClient
 
 from .mcp_instance import mcp
 
+_MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
+_user_name_cache: dict[str, str] = {}
+
 
 def _client() -> WebClient:
     return WebClient(token=os.environ["SLACK_USER_TOKEN"])
+
+
+def _resolve_user_name(client: WebClient, user_id: str) -> str:
+    if user_id not in _user_name_cache:
+        try:
+            profile = client.users_info(user=user_id)["user"]
+            _user_name_cache[user_id] = (
+                profile.get("profile", {}).get("display_name")
+                or profile.get("real_name")
+                or user_id
+            )
+        except Exception:
+            _user_name_cache[user_id] = user_id
+    return _user_name_cache[user_id]
+
+
+def _resolve_mentions(client: WebClient, text: str) -> str:
+    return _MENTION_RE.sub(
+        lambda m: f"@{_resolve_user_name(client, m.group(1))}", text
+    )
 
 
 @mcp.tool()
@@ -26,8 +50,33 @@ def slack_list_channels(limit: int = 100) -> list[dict]:
 @mcp.tool()
 def slack_read_channel_history(channel: str, limit: int = 20) -> list[dict]:
     """Read recent messages from a Slack channel (channel ID)"""
-    resp = _client().conversations_history(channel=channel, limit=limit)
+    client = _client()
+    resp = client.conversations_history(channel=channel, limit=limit)
     return [
-        {"user": m.get("user"), "text": m.get("text"), "ts": m.get("ts")}
+        {
+            "user": _resolve_user_name(client, m["user"]) if m.get("user") else None,
+            "text": _resolve_mentions(client, m.get("text", "")),
+            "ts": m.get("ts"),
+        }
         for m in resp["messages"]
+    ]
+
+
+@mcp.tool()
+def slack_search_messages(query: str, count: int = 20) -> list[dict]:
+    """Full-text search across all Slack channels/DMs the user is a member of.
+    Use this for 'has anyone discussed X' or 'find messages about X' questions instead
+    of listing channels and reading each one's history."""
+    client = _client()
+    resp = client.search_messages(query=query, count=count)
+    matches = resp["messages"]["matches"]
+    return [
+        {
+            "channel": m.get("channel", {}).get("name"),
+            "user": _resolve_user_name(client, m["user"]) if m.get("user") else None,
+            "text": _resolve_mentions(client, m.get("text", "")),
+            "ts": m.get("ts"),
+            "permalink": m.get("permalink"),
+        }
+        for m in matches
     ]
