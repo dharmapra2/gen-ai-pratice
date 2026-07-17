@@ -49,12 +49,16 @@ def _trim_for_model(messages: list, max_turns: int) -> list:
     return messages[human_idxs[-max_turns]:]
 
 
-def build_graph(model, tools):
+def build_graph(model, tools, chat_session: dict):
     model_with_tools = model.bind_tools(tools)
 
     async def agent_node(state: MessagesState):
         trimmed = _trim_for_model(state["messages"], MAX_HISTORY_TURNS)
-        response = await model_with_tools.ainvoke([SystemMessage(content=SYSTEM_PROMPT), *trimmed])
+        system_prompt = SYSTEM_PROMPT
+        language = chat_session.get("language")
+        if language:
+            system_prompt += f"\n\nAlways reply in {language}, regardless of what language the user writes in or what language tool results come back in."
+        response = await model_with_tools.ainvoke([SystemMessage(content=system_prompt), *trimmed])
         return {"messages": [response]}
 
     graph = StateGraph(MessagesState)
@@ -129,15 +133,22 @@ async def main():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await load_mcp_tools(session)
-            app = build_graph(model, tools)
+            chat_session = {"language": None}
+            app = build_graph(model, tools, chat_session)
             config = {"configurable": {"thread_id": THREAD_ID}}
 
-            print(f"Connected. {len(tools)} tools available. Type 'exit' to quit.\n")
+            print(f"Connected. {len(tools)} tools available. Type 'exit' to quit.")
+            print("Type '/lang <language>' to set the reply language (e.g. '/lang Hindi'), '/lang' to reset to auto.\n")
             while True:
                 user_input = input("You: ").strip()
                 if user_input.lower() in ("exit", "quit"):
                     break
                 if not user_input:
+                    continue
+                if user_input.lower() == "/lang" or user_input.lower().startswith("/lang "):
+                    language = user_input[len("/lang"):].strip()
+                    chat_session["language"] = language or None
+                    print(f"\n(reply language set to: {language or 'auto'})\n")
                     continue
                 await chat_turn(app, config, user_input)
 
