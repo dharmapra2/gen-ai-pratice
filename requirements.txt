@@ -43,6 +43,6 @@ google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 langchain
-langchain-groq
+langchain-openai
 langchain-mcp-adapters
 langgraph

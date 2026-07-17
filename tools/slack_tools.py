@@ -33,6 +33,10 @@ def _resolve_mentions(client: WebClient, text: str) -> str:
     )
 
 
+def _truncate(text: str, limit: int = 300) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 @mcp.tool()
 def slack_list_channels(limit: int = 100) -> list[dict]:
     """List channels the bot can see in the Slack workspace"""
@@ -55,7 +59,7 @@ def slack_read_channel_history(channel: str, limit: int = 20) -> list[dict]:
     return [
         {
             "user": _resolve_user_name(client, m["user"]) if m.get("user") else None,
-            "text": _resolve_mentions(client, m.get("text", "")),
+            "text": _truncate(_resolve_mentions(client, m.get("text", "")), 1000),
             "ts": m.get("ts"),
         }
         for m in resp["messages"]
@@ -66,7 +70,8 @@ def slack_read_channel_history(channel: str, limit: int = 20) -> list[dict]:
 def slack_search_messages(query: str, count: int = 20) -> list[dict]:
     """Full-text search across all Slack channels/DMs the user is a member of.
     Use this for 'has anyone discussed X' or 'find messages about X' questions instead
-    of listing channels and reading each one's history."""
+    of listing channels and reading each one's history. Returns short previews — use
+    slack_read_channel_history near a result's ts to read a match in full."""
     client = _client()
     resp = client.search_messages(query=query, count=count)
     matches = resp["messages"]["matches"]
@@ -74,7 +79,7 @@ def slack_search_messages(query: str, count: int = 20) -> list[dict]:
         {
             "channel": m.get("channel", {}).get("name"),
             "user": _resolve_user_name(client, m["user"]) if m.get("user") else None,
-            "text": _resolve_mentions(client, m.get("text", "")),
+            "text": _truncate(_resolve_mentions(client, m.get("text", ""))),
             "ts": m.get("ts"),
             "permalink": m.get("permalink"),
         }
