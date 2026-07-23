@@ -5,6 +5,7 @@ from tools import (  # noqa: F401
     notion_tools,
     google_tools,
     db_tools,
+    chroma_tools,
 )
 
 

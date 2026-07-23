@@ -10,11 +10,13 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, MessagesState, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import tools_condition
+from langgraph.types import Command
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 import memory
+from graph_utils import make_tools_node
 
 MCP_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
@@ -23,7 +25,9 @@ THREAD_ID = "cli-session"
 
 SYSTEM_PROMPT = (
     "You are an assistant with tools for Slack, GitHub, Notion, Google Workspace "
-    "(Gmail/Calendar/Drive), and a read-only Postgres database. Translate the user's "
+    "(Gmail/Calendar/Drive), a read-only Postgres database, and a Chroma vector "
+    "database (chroma_query for semantic search over a collection, chroma_add_documents "
+    "to store new text). Translate the user's "
     "natural language request into correct tool arguments (e.g. Gmail search syntax "
     "for gmail_list_messages) and use the tools to answer. For 'has anyone discussed X' "
     "or 'find messages about X' style Slack questions, use slack_search_messages "
@@ -68,23 +72,24 @@ def build_graph(model, tools, chat_session: dict):
 
     graph = StateGraph(MessagesState)
     graph.add_node("agent", agent_node)
-    graph.add_node("tools", ToolNode(tools))
+    graph.add_node("tools", make_tools_node(tools))
     graph.set_entry_point("agent")
     graph.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
     return graph.compile(checkpointer=InMemorySaver())
 
 
-async def _stream_once(app, config, input_messages: list) -> str:
+async def _stream_once(app, config, graph_input) -> tuple[str, dict | None]:
     """Streams one graph run: tool calls/results print live as nodes complete, and
-    the assistant's reply streams token by token. Returns the full streamed reply
-    text (empty string if nothing came back)."""
+    the assistant's reply streams token by token. Returns (streamed_text, pending)
+    where pending is {"tool": name, "args": args} if the graph paused on a write
+    tool's confirmation gate, else None."""
     streamed_text = ""
     printed_prefix = False
-    async for mode, chunk in app.astream(
-        {"messages": input_messages}, config=config, stream_mode=["messages", "updates"]
-    ):
+    async for mode, chunk in app.astream(graph_input, config=config, stream_mode=["messages", "updates"]):
         if mode == "updates":
+            if "__interrupt__" in chunk:
+                return streamed_text, chunk["__interrupt__"][0].value
             for node_name, update in chunk.items():
                 for m in update.get("messages", []):
                     if node_name == "agent":
@@ -103,31 +108,44 @@ async def _stream_once(app, config, input_messages: list) -> str:
                     printed_prefix = True
                 print(text, end="", flush=True)
                 streamed_text += text
-    return streamed_text
+    return streamed_text, None
 
 
 async def chat_turn(app, config, user_input: str) -> None:
-    """Retries once on an empty completion or a transient API error. On retry the
-    user message isn't resent — it's already in the checkpointer from the first
-    attempt, so we just re-run the graph from that persisted state."""
-    input_messages = [HumanMessage(content=user_input)]
-    for attempt in range(2):
+    """Runs a turn to completion, pausing for a y/n on every write-tool call
+    (github_create_issue, gmail_send_message, etc. — see graph_utils.WRITE_TOOLS)
+    before it's allowed to execute. Retries once on an empty completion or a
+    transient API error; on that retry the user message isn't resent — it's already
+    in the checkpointer from the first attempt, so we just re-run from that state."""
+    graph_input = {"messages": [HumanMessage(content=user_input)]}
+    retried = False
+    while True:
         try:
-            streamed_text = await _stream_once(app, config, input_messages)
+            streamed_text, pending = await _stream_once(app, config, graph_input)
         except Exception as e:
-            if attempt == 0:
-                input_messages = []
+            if not retried:
+                retried = True
+                graph_input = {"messages": []}
                 continue
             print(f"\nAssistant: (model/tool call failed: {e})\n")
             return
+
+        if pending is not None:
+            answer = input(f"\n  ⚠ Confirm running {pending['tool']}({pending['args']})? [y/N]: ").strip().lower()
+            graph_input = Command(resume=answer in ("y", "yes"))
+            continue
+
         if streamed_text:
             print("\n")
             memory.remember_turn(user_input, streamed_text)
             return
-        if attempt == 0:
-            input_messages = []
+
+        if not retried:
+            retried = True
+            graph_input = {"messages": []}
             continue
         print("\nAssistant: (empty response from model, try rephrasing)\n")
+        return
 
 
 async def main():

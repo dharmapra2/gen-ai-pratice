@@ -1,8 +1,9 @@
 # gen-ai-practice — MCP server + LangGraph agent
 
 An MCP (Model Context Protocol) server exposing tools for Slack, GitHub, Notion,
-Google Workspace (Gmail/Calendar/Drive), and a read-only Postgres database — plus a
-terminal chat client that connects to it through a LangGraph agent (OpenAI-backed).
+Google Workspace (Gmail/Calendar/Drive), a read-only Postgres database, and a Chroma
+vector database — plus a terminal chat client that connects to it through a
+LangGraph agent (OpenAI-backed).
 
 ## Architecture
 
@@ -15,19 +16,28 @@ server.py            MCP server (streamable-http, port 8000)
     notion_tools.py     search, read, query, create pages
     google_tools.py     Gmail, Calendar, Drive (OAuth installed-app flow)
     db_tools.py          read-only Postgres queries
+    chroma_tools.py      Chroma Cloud collections + semantic query
 
 agent.py              Terminal chat client
   - connects to server.py over MCP (streamable-http)
   - loads all MCP tools via langchain-mcp-adapters
   - explicit LangGraph StateGraph: agent node (OpenAI + tools) <-> tools node
-  - InMemorySaver checkpointer for in-process conversation memory
+  - InMemorySaver checkpointer for conversation memory + write-tool confirmation
   - streams tokens + tool calls live to the terminal
 
 streamlit_app.py      Web chat client (same graph shape as agent.py)
   - opens a fresh MCP connection per turn instead of one long-lived one
     (Streamlit reruns the whole script on every interaction)
-  - keeps conversation history in st.session_state instead of a checkpointer
+  - checkpointer instance lives in st.session_state so it survives reruns —
+    needed so a write-tool confirmation can pause here and resume after a
+    button click, which is a brand new script execution
   - same streaming tool-call/reply display, as chat bubbles
+
+graph_utils.py        Shared write-tool confirmation gate (used by both clients)
+  - WRITE_TOOLS: the tool names that mutate something external
+  - make_tools_node(tools): a tools node that calls langgraph's interrupt()
+    before any WRITE_TOOLS call — the tool physically cannot run until the
+    caller resumes the graph with Command(resume=True/False)
 
 memory.py             Mem0 wrapper — used by both clients above
   - recall(query): fetch facts relevant to the current message
@@ -129,6 +139,14 @@ history, which resets when the process restarts.
 If unset (or Mem0 is unreachable), both clients degrade gracefully — `memory.py`
 catches the error and just returns no memories, it doesn't break the chat.
 
+#### Chroma (vector database)
+
+Uses [Chroma Cloud](https://trychroma.com) — no local Chroma server to run.
+
+1. Get an API key from Chroma Cloud.
+2. Set `CHROMA_API_KEY` in `.env`. `CHROMA_TENANT`/`CHROMA_DATABASE` are optional —
+   Chroma resolves them from the API key if omitted.
+
 ## Running it
 
 **Terminal 1 — start the MCP server:**
@@ -146,7 +164,7 @@ python agent.py
 ```
 
 ```
-Connected. 23 tools available. Type 'exit' to quit.
+Connected. 28 tools available. Type 'exit' to quit.
 Type '/lang <language>' to set the reply language (e.g. '/lang Hindi'), '/lang' to reset to auto.
 
 You: has anyone discussed the introspeq project in slack?
@@ -203,11 +221,33 @@ claude mcp add --transport http mcp-tools http://127.0.0.1:8000/mcp
 | Notion | `notion_search`, `notion_get_page`, `notion_query_database`, `notion_create_page` |
 | Google | `gmail_list_messages`, `gmail_send_message`, `calendar_list_events`, `calendar_create_event`, `drive_list_files`, `drive_read_file` |
 | Postgres | `db_query` (read-only), `db_list_tables`, `db_describe_table` |
+| Chroma | `chroma_list_collections`, `chroma_create_collection`, `chroma_delete_collection`, `chroma_add_documents`, `chroma_query` |
 | Sample | `add`, `greet` |
 
 `slack_send_message` exists in `slack_tools.py` but is commented out (not registered)
 — uncomment the `@mcp.tool()` line if you want the agent able to post messages, not
 just read them.
+
+## Write-tool confirmation
+
+Everything above is read-only except these, which mutate something external:
+`github_create_issue`, `notion_create_page`, `gmail_send_message`,
+`calendar_create_event`, `chroma_create_collection`, `chroma_delete_collection`,
+`chroma_add_documents` (the full list is `graph_utils.WRITE_TOOLS`).
+
+Both clients gate these behind a **hard confirmation step** — not a system-prompt
+request that the model could ignore, but a LangGraph `interrupt()` inside the tools
+node itself: the tool call physically cannot execute until the graph is resumed with
+`Command(resume=True)`. Declining resumes with `Command(resume=False)` instead, which
+skips the tool entirely and returns "User declined to run X" to the model so it can
+react sensibly. Read-only tool calls in the same turn aren't blocked by this — only
+the write ones pause.
+
+- **agent.py**: prints `⚠ Confirm running <tool>(<args>)? [y/N]` and blocks on `input()`.
+- **streamlit_app.py**: shows the pending call with Confirm/Cancel buttons in a chat
+  bubble. Clicking either triggers a fresh script rerun that resumes the same paused
+  graph state (via the session's persisted checkpointer + thread_id), rather than
+  resubmitting the original message.
 
 ## Notes / gotchas
 
@@ -220,3 +260,9 @@ just read them.
 - **Free-tier LLM quotas are per-model and vary a lot per project** — if you swap
   `OPENAI_MODEL` for a free-tier provider's model, expect to hit daily/per-minute caps
   quickly on anything beyond light testing.
+- **streamlit_app.py's checkpointer changed its token profile**: it used to keep only
+  clean (Human, AI) pairs in `st.session_state` and rebuild the model's context from
+  those each turn. Now that it needs a checkpointer for write-tool confirmation to work,
+  the last `MAX_HISTORY_TURNS` turns of *raw* graph state (including intermediate tool
+  calls/results) get resent instead — slightly more tokens per call than before, though
+  Slack search truncation (above) keeps the worst case in check.

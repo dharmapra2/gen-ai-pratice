@@ -48,3 +48,4 @@ langchain-mcp-adapters
 langgraph
 streamlit
 mem0ai
+chromadb
