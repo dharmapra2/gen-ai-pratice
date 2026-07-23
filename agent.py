@@ -14,6 +14,8 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+import memory
+
 MCP_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 MAX_HISTORY_TURNS = 6
@@ -58,6 +60,9 @@ def build_graph(model, tools, chat_session: dict):
         language = chat_session.get("language")
         if language:
             system_prompt += f"\n\nAlways reply in {language}, regardless of what language the user writes in or what language tool results come back in."
+        memories = chat_session.get("memories")
+        if memories:
+            system_prompt += f"\n\n{memories}"
         response = await model_with_tools.ainvoke([SystemMessage(content=system_prompt), *trimmed])
         return {"messages": [response]}
 
@@ -70,10 +75,11 @@ def build_graph(model, tools, chat_session: dict):
     return graph.compile(checkpointer=InMemorySaver())
 
 
-async def _stream_once(app, config, input_messages: list) -> bool:
+async def _stream_once(app, config, input_messages: list) -> str:
     """Streams one graph run: tool calls/results print live as nodes complete, and
-    the assistant's reply streams token by token. Returns whether any text was shown."""
-    printed_any = False
+    the assistant's reply streams token by token. Returns the full streamed reply
+    text (empty string if nothing came back)."""
+    streamed_text = ""
     printed_prefix = False
     async for mode, chunk in app.astream(
         {"messages": input_messages}, config=config, stream_mode=["messages", "updates"]
@@ -96,8 +102,8 @@ async def _stream_once(app, config, input_messages: list) -> bool:
                     print("\nAssistant: ", end="", flush=True)
                     printed_prefix = True
                 print(text, end="", flush=True)
-                printed_any = True
-    return printed_any
+                streamed_text += text
+    return streamed_text
 
 
 async def chat_turn(app, config, user_input: str) -> None:
@@ -107,15 +113,16 @@ async def chat_turn(app, config, user_input: str) -> None:
     input_messages = [HumanMessage(content=user_input)]
     for attempt in range(2):
         try:
-            printed_any = await _stream_once(app, config, input_messages)
+            streamed_text = await _stream_once(app, config, input_messages)
         except Exception as e:
             if attempt == 0:
                 input_messages = []
                 continue
             print(f"\nAssistant: (model/tool call failed: {e})\n")
             return
-        if printed_any:
+        if streamed_text:
             print("\n")
+            memory.remember_turn(user_input, streamed_text)
             return
         if attempt == 0:
             input_messages = []
@@ -150,6 +157,7 @@ async def main():
                     chat_session["language"] = language or None
                     print(f"\n(reply language set to: {language or 'auto'})\n")
                     continue
+                chat_session["memories"] = memory.recall(user_input)
                 await chat_turn(app, config, user_input)
 
 

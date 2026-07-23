@@ -20,13 +20,24 @@ agent.py              Terminal chat client
   - connects to server.py over MCP (streamable-http)
   - loads all MCP tools via langchain-mcp-adapters
   - explicit LangGraph StateGraph: agent node (OpenAI + tools) <-> tools node
-  - InMemorySaver checkpointer for conversation memory
+  - InMemorySaver checkpointer for in-process conversation memory
   - streams tokens + tool calls live to the terminal
+
+streamlit_app.py      Web chat client (same graph shape as agent.py)
+  - opens a fresh MCP connection per turn instead of one long-lived one
+    (Streamlit reruns the whole script on every interaction)
+  - keeps conversation history in st.session_state instead of a checkpointer
+  - same streaming tool-call/reply display, as chat bubbles
+
+memory.py             Mem0 wrapper — used by both clients above
+  - recall(query): fetch facts relevant to the current message
+  - remember_turn(user_input, reply): store the turn for future sessions
+  - persists across process restarts (unlike the two clients' own history)
 ```
 
 The two processes are independent: `server.py` just serves MCP tools over HTTP;
-`agent.py` (or any other MCP client — Claude Code, MCP Inspector, etc.) is what
-turns natural language into tool calls.
+`agent.py` / `streamlit_app.py` (or any other MCP client — Claude Code, MCP
+Inspector, etc.) is what turns natural language into tool calls.
 
 ## Setup
 
@@ -100,11 +111,23 @@ requires a Workspace admin), so this uses a one-time interactive browser login i
 
 `credentials/` and `*.json` are already in `.gitignore`, so these never get committed.
 
-#### OpenAI (for `agent.py`)
+#### OpenAI (for `agent.py` / `streamlit_app.py`)
 
 1. Get an API key from [platform.openai.com](https://platform.openai.com/api-keys).
 2. Set `OPENAI_API_KEY` in `.env`. Defaults to `gpt-4.1-mini`; override with
    `OPENAI_MODEL` if you want a different model.
+
+#### Mem0 (persistent memory)
+
+Both clients use the hosted [Mem0](https://mem0.ai) platform to remember facts about
+you across sessions — separate from each client's own in-process conversation
+history, which resets when the process restarts.
+
+1. Get a free API key from [app.mem0.ai](https://app.mem0.ai).
+2. Set `MEM0_API_KEY` in `.env`.
+
+If unset (or Mem0 is unreachable), both clients degrade gracefully — `memory.py`
+catches the error and just returns no memories, it doesn't break the chat.
 
 ## Running it
 
@@ -142,6 +165,18 @@ Chat commands:
 Conversation memory persists for the life of the process (LangGraph checkpointer),
 but only the last 6 user turns are actually sent to the model each call to keep
 token usage roughly flat — full history stays in the checkpointer either way.
+Durable facts (name, preferences, project details, etc.) persist across restarts
+too, via Mem0 — see below.
+
+**Terminal 2 (alternative) — or the web UI instead:**
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Opens at `http://localhost:8501`. Same tools, same streaming tool-call/reply
+behavior, chat bubbles instead of a terminal, and a "Reply language" field in the
+sidebar instead of `/lang`.
 
 ## Testing tools without the agent
 
